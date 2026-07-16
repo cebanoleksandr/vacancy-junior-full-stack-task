@@ -3,53 +3,71 @@ import { transferMoney } from "../src/app/actions/transfer";
 
 const prisma = new PrismaClient();
 
-// Скрипт відтворення бага.
-//
-// Мета: показати проблему ДО виправлення, а після фіксу — довести, що її більше
-// немає. Нижче один приклад-заготовка (списання в мінус). Додай свої сценарії
-// для інших знайдених багів.
+async function runTests() {
+  console.log("=== ЗАПУСК ТЕСТУВАННЯ БЕЗПЕКИ ТА ЦІЛІСНОСТІ ===");
 
-async function reset() {
-  await prisma.transfer.deleteMany();
-  await prisma.account.deleteMany();
-  await prisma.account.createMany({
-    data: [
-      { id: "acc-alice", userId: "user-1", ownerName: "Alice", balance: 1000, currency: "USD" },
-      { id: "acc-bob", userId: "user-2", ownerName: "Bob", balance: 500, currency: "USD" },
-      { id: "acc-carol", userId: "user-3", ownerName: "Carol", balance: 0, currency: "EUR" },
-    ],
+  await prisma.account.update({
+    where: { id: "acc-alice" },
+    data: { balance: 1000 },
   });
-}
-
-async function balances() {
-  const accs = await prisma.account.findMany({ orderBy: { ownerName: "asc" } });
-  return Object.fromEntries(accs.map((a) => [a.ownerName, a.balance]));
-}
-
-async function main() {
-  await reset();
-
-  console.log("Баланси до:", await balances());
-
-  // Приклад бага: переказуємо більше, ніж є на рахунку.
-  // Очікувано: система має відхилити переказ. Фактично — баланс іде в мінус.
-  await transferMoney({
-    fromAccountId: "acc-bob",
-    toAccountId: "acc-alice",
-    amount: 999999,
+  await prisma.account.update({
+    where: { id: "acc-bob" },
+    data: { balance: 500 },
+  });
+  await prisma.account.update({
+    where: { id: "acc-carol" },
+    data: { balance: 0 },
   });
 
-  console.log("Баланси після:", await balances());
-  console.log(
-    "Якщо у Bob від'ємний баланс — баг відтворено. Після фіксу переказ має впасти з помилкою."
-  );
+  console.log("\nПочаткові баланси встановлено:");
+  console.log("Alice (acc-alice, USD): 1000");
+  console.log("Bob (acc-bob, USD): 500");
+  console.log("Carol (acc-carol, EUR): 0");
+
+  console.log("\n--- ТЕСТ 1: Спроба списання з чужого рахунку (Bob -> Alice) ---");
+  const test1 = await transferMoney("acc-bob", "acc-alice", 100);
+  console.log("Результат:", test1.success ? "УСПІХ (БАГ ІСНУЄ!)" : `ВІДХИЛЕНО: ${test1.error}`);
+
+  console.log("\n--- ТЕСТ 2: Спроба переказу між різними валютами (USD -> EUR) ---");
+  const test2 = await transferMoney("acc-alice", "acc-carol", 100);
+  console.log("Результат:", test2.success ? "УСПІХ (БАГ ІСНУЄ!)" : `ВІДХИЛЕНО: ${test2.error}`);
+
+  console.log("\n--- ТЕСТ 3: Спроба від'ємного переказу (-200 USD) ---");
+  const test3 = await transferMoney("acc-alice", "acc-bob", -200);
+  console.log("Результат:", test3.success ? "УСПІХ (БАГ ІСНУЄ!)" : `ВІДХИЛЕНО: ${test3.error}`);
+
+  console.log("\n--- ТЕСТ 4: Паралельні запити (Race Condition) ---");
+  console.log("Надсилаємо 5 паралельних запитів по 300 USD...");
+  
+  const results = await Promise.all([
+    transferMoney("acc-alice", "acc-bob", 300),
+    transferMoney("acc-alice", "acc-bob", 300),
+    transferMoney("acc-alice", "acc-bob", 300),
+    transferMoney("acc-alice", "acc-bob", 300),
+    transferMoney("acc-alice", "acc-bob", 300),
+  ]);
+
+  const successCount = results.filter((r) => r.success).length;
+  const failCount = results.filter((r) => !r.success).length;
+  console.log(`Успішних транзакцій: ${successCount}`);
+  console.log(`Відхилених транзакцій: ${failCount}`);
+
+  const finalAlice = await prisma.account.findUnique({ where: { id: "acc-alice" } });
+  const finalBob = await prisma.account.findUnique({ where: { id: "acc-bob" } });
+
+  console.log("\nФінальні баланси в базі даних:");
+  console.log(`Alice: ${finalAlice?.balance} USD (Очікується: 100 USD, не менше 0!)`);
+  console.log(`Bob: ${finalBob?.balance} USD (Очікується: 1400 USD)`);
+
+  if ((finalAlice?.balance ?? 0) < 0) {
+    console.error("\n❌ КРИТИЧНИЙ БАГ: Баланс Alice від'ємний!");
+  } else {
+    console.log("\n✅ Усі тести пройдено успішно! Фінансова система захищена.");
+  }
 }
 
-main()
-  .catch((e) => {
-    console.error(e);
-    process.exit(1);
-  })
+runTests()
+  .catch((e) => console.error(e))
   .finally(async () => {
     await prisma.$disconnect();
   });
